@@ -1,0 +1,14 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.5.2
+pydantic-settings==2.1.0
+python-multipart
+requests
+dropbox
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+pypdf
+reportlab
+img2pdf
+python-dotenv

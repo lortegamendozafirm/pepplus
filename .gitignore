@@ -1,0 +1,44 @@
+#Quitar cuando se suba a google run
+#.env
+#*.json
+
+# Archivos de configuración de entorno virtual
+venv/
+.venv/
+env/
+
+# Archivos de dependencias y lock
+poetry.lock
+Pipfile.lock
+
+# Archivos temporales y de sistema
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# Archivos de logs
+*.log
+
+# Archivos de usuario y editor
+.vscode/
+.idea/
+*.code-workspace
+
+# Otros archivos a ignorar
+*.pdf
+*.sqlite3
+
+# Archivos de documentación
+consideracionenv.txt
+
+# Archivos Basura
+prompts.txt
+test_document.txt
+pasos.txt
+algo.txt
