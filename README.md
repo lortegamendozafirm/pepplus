@@ -1,233 +1,358 @@
-# VAWA Packet Assembler Service
+# PDF Packet Service
 
-🤖📄 Microservicio de automatización robótica (RPA) basado en **FastAPI** y **Google Cloud Run**.  
-Su función es ensamblar expedientes legales complejos para solicitudes de visa **VAWA**, extrayendo evidencia desde **Dropbox**, procesándola y entregando un PDF final en **Google Drive**.
+Microservicio en Python 3.11 + FastAPI para ensamblar un PDF final a partir de múltiples PDFs obtenidos de Dropbox, con reporte de progreso en Google Sheets y desplegable en Google Cloud Run.
 
-Este servicio está diseñado para ser consumido por **Google Apps Script** u otros clientes HTTP.
+## 📋 Características
 
----
+- ✅ **Ensamblado de PDFs**: Combina múltiples PDFs en orden usando `pypdf`
+- ✅ **Sistema de Slots**: Manifest flexible para definir qué documentos incluir
+- ✅ **Resolución inteligente**: Mapea archivos de Dropbox a slots usando folder hints y patrones
+- ✅ **Integración Dropbox**: Descarga automática desde carpetas compartidas
+- ✅ **Reporte en Google Sheets**: Actualizaciones de progreso en tiempo real
+- ✅ **Arquitectura por capas**: Domain, Services, Integrations, API
+- ✅ **Enqueuer integration**: Soporte para jobs de larga duración
 
-## 🚀 Características principales
+## 🏗️ Arquitectura
 
-- **Arquitectura de Microservicios**  
-  Se integra con un servicio externo (`AccessTokenDropbox`) para obtener tokens de Dropbox siempre válidos.
+```
+app/
+├── domain/          # Modelos puros y reglas de negocio
+│   ├── slot.py           # Definición de Slot y SlotMeta
+│   ├── manifest.py       # Manifest con validación y máscaras
+│   ├── packet.py         # Packet, SheetOutputConfig, SheetPosition
+│   └── slot_resolution.py # SlotResolver con lógica de mapeo
+├── services/        # Orquestación y lógica de aplicación
+│   ├── packet_service.py    # Servicio principal
+│   └── progress_reporter.py # Reporte de progreso
+├── integrations/    # Integraciones externas
+│   ├── dropbox_handler.py      # Operaciones de Dropbox API
+│   ├── dropbox_client.py       # Cliente de alto nivel
+│   ├── dropbox_token_client.py # Cliente de tokens
+│   ├── sheets_client.py        # Cliente de Google Sheets API v4
+│   └── enqueuer_client.py      # Cliente del servicio enqueuer
+├── pdf/             # Capa de ensamblado de PDFs
+│   └── pdf_assembler.py # merge_pdfs_in_order()
+├── api/             # FastAPI routers y schemas
+│   ├── routes.py    # Endpoints /enqueue y /process
+│   └── schemas.py   # Pydantic models
+├── config/          # Configuración
+│   └── settings.py  # Settings con pydantic-settings
+└── logger.py        # Logging configurado
+```
 
-- **Búsqueda Inteligente ("Fuzzy Search")**  
-  Encuentra carpetas y archivos incluso si los nombres varían ligeramente  
-  (ej: `Filed Copy` vs `FILE-COPY`).
+## 🚀 Endpoints
 
-- **Conversión Automática**  
-  Detecta imágenes (`.jpg`, `.png`, etc.) y las convierte a **PDF** automáticamente.
+### `POST /api/v1/packets/enqueue`
 
-- **Ensamblaje Estructurado**  
-  Genera un PDF maestro con portadas y separadores (Exhibits) siguiendo reglas de negocio legales estrictas.
+Encola un paquete para procesamiento asíncrono (respuesta inmediata).
 
-- **Reporte de Fallos**  
-  Genera un reporte PDF interno si faltan documentos obligatorios y actualiza el estado en **Google Sheets**.
+**Request:**
+```json
+{
+  "client_name": "Jane Doe",
+  "dropbox_url": "https://www.dropbox.com/scl/fo/...",
+  "sheet_output_config": {
+    "spreadsheet_id": "1abc...",
+    "sheet_name": "VAWA"
+  },
+  "sheet_position": {
+    "row": 12,
+    "col_output": 5,
+    "col_status": 6
+  },
+  "manifest": [
+    {
+      "slot": 1,
+      "name": "Exhibit A – Cover",
+      "required": true,
+      "folder_hint": "EXHIBIT 1",
+      "filename_patterns": ["cover*.pdf", "petition.pdf"],
+      "tags": ["important"]
+    }
+  ]
+}
+```
 
-- **Google Cloud Native**  
-  Optimizado para **Cloud Run** con logging estructurado y manejo de secretos.
+**Response (202 Accepted):**
+```json
+{
+  "status": "enqueued",
+  "message": "Job enqueued successfully for client Jane Doe",
+  "job_id": "job-abc123"
+}
+```
 
----
+### `POST /api/v1/packets/process`
 
-## 🛠️ Arquitectura del proyecto
+Procesa un paquete de forma síncrona (usado por el enqueuer).
 
-```plaintext
-preensamblado-service/
-├── app/
-│   ├── api/v1/packet.py       # Endpoint principal
-│   ├── integrations/          # Clientes (Dropbox, Google, TokenService)
-│   ├── services/              # Lógica de negocio (Orquestador, PDF Engine)
-│   ├── utils/                 # Logger y helpers
-│   ├── config.py              # Configuración global (Pydantic)
-│   └── main.py                # Inicialización de FastAPI
-├── Dockerfile                 # Configuración para Cloud Run
-├── requirements.txt           # Dependencias
-└── .env                       # Variables de entorno (local)
-````
+**Response (200 OK):**
+```json
+{
+  "status": "completed",
+  "message": "Processed packet for Jane Doe. Output: /tmp/packet_Jane_Doe.pdf",
+  "job_id": null
+}
+```
 
----
+## ⚙️ Configuración
 
-## 📋 Prerrequisitos
-
-* **Python 3.10+** instalado.
-* **Google Cloud SDK (`gcloud`)** instalado y configurado.
-* **Cuenta de servicio de Google (JSON)** con permisos para:
-
-  * Google Drive API
-  * Google Sheets API
-* **Servicio de Tokens desplegado** (`AccessTokenDropbox`):
-
-  * URL pública del servicio
-  * Firma/secret compartido
-
----
-
-## ⚙️ Configuración (variables de entorno)
-
-El servicio se configura mediante variables de entorno (o un archivo `.env` en local).
-
-| Variable                    | Descripción                            | Ejemplo                           |
-| --------------------------- | -------------------------------------- | --------------------------------- |
-| `APP_NAME`                  | Nombre del servicio                    | `VAWA Assembler`                  |
-| `LOG_LEVEL`                 | Nivel de detalle de logs               | `INFO` o `DEBUG`                  |
-| `GOOGLE_CREDENTIALS_FILE`   | Ruta al JSON de credenciales de Google | `credentials.json`                |
-| `TOKEN_SERVICE_URL`         | URL del microservicio de tokens        | `https://...run.app/api/v1/token` |
-| `TOKEN_SERVICE_SIGNATURE`   | Firma (secret) compartida              | `tu-api-secret-key`               |
-| `TOKEN_SERVICE_CLIENT_NAME` | Nombre lógico de este cliente          | `vawa_assembler`                  |
-
----
-
-## 💻 Instalación y ejecución local
-
-### 1. Clonar y preparar entorno
+### Variables de entorno (.env)
 
 ```bash
-# Clonar repositorio (si aplica)
-git clone <repo-url>
-cd preensamblado-service
+# Service name
+PACKET_APP_NAME=pdf-packet-service
 
+# Dropbox integration
+PACKET_DROPBOX_TOKEN_SERVICE_URL=https://accesstokendropbox-xxx.run.app/api/v1/token
+PACKET_DROPBOX_SERVICE_SIGNATURE=930xY0dJ0pD
+
+# Google Sheets integration
+PACKET_GOOGLE_CREDENTIALS_PATH=/path/to/service-account.json
+
+# GCP configuration
+PACKET_GCP_PROJECT_ID=my-project-id
+
+# Storage
+PACKET_TEMP_DIR=/tmp
+
+# Enqueuer integration (opcional)
+PACKET_ENQUEUER_SERVICE_URL=https://enqueuer-xxx.run.app
+```
+
+### Service Account de Google
+
+1. Crear service account en GCP Console
+2. Habilitar Google Sheets API
+3. Descargar JSON de credenciales
+4. Compartir las Sheets con el email del service account
+
+## 📦 Instalación
+
+### Local
+
+```bash
 # Crear entorno virtual
 python -m venv venv
-source venv/bin/activate      # Mac/Linux
-# venv\Scripts\activate       # Windows
+source venv/bin/activate  # En Windows: venv\Scripts\activate
 
 # Instalar dependencias
 pip install -r requirements.txt
+
+# Configurar variables de entorno
+cp .env.example .env
+# Editar .env con tus credenciales
+
+# Ejecutar servidor
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# Abrir documentación interactiva
+# http://localhost:8000/docs
 ```
 
-### 2. Configurar credenciales
-
-1. Coloca tu archivo `credentials.json` (Service Account de Google) en la **raíz del proyecto**.
-2. Crea un archivo `.env` en la raíz con las variables mencionadas en la sección anterior.
-
-### 3. Ejecutar servidor
+### Docker
 
 ```bash
-uvicorn app.main:app --reload
+# Build
+docker build -t pdf-packet-service .
+
+# Run
+docker run --env-file .env -p 8000:8000 pdf-packet-service
 ```
 
-El servicio estará disponible en:
+## ☁️ Despliegue en Cloud Run
 
-* Swagger UI: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-
----
-
-## ☁️ Despliegue en Google Cloud Run
-
-### 1. Construir y subir imagen
+### Con gcloud CLI
 
 ```bash
-export PROJECT_ID="tu-proyecto-gcp"
-export IMAGE_NAME="vawa-assembler"
+# Configurar proyecto
+export PROJECT_ID=my-project-id
+gcloud config set project $PROJECT_ID
 
-gcloud builds submit --tag gcr.io/$PROJECT_ID/$IMAGE_NAME
-```
+# Build imagen
+gcloud builds submit --tag gcr.io/$PROJECT_ID/pdf-packet-service
 
-### 2. Desplegar servicio
-
-```bash
-gcloud run deploy $IMAGE_NAME \
-  --image gcr.io/$PROJECT_ID/$IMAGE_NAME \
+# Deploy a Cloud Run
+gcloud run deploy pdf-packet-service \
+  --image gcr.io/$PROJECT_ID/pdf-packet-service \
   --platform managed \
   --region us-central1 \
-  --memory 1Gi \
-  --timeout 300s \
-  --set-env-vars "TOKEN_SERVICE_URL=https://tusservicio.run.app/api/v1/token,TOKEN_SERVICE_SIGNATURE=tu_secreto,TOKEN_SERVICE_CLIENT_NAME=vawa_client" \
-  --service-account "tu-service-account@tu-proyecto.iam.gserviceaccount.com"
+  --allow-unauthenticated \
+  --timeout 3600 \
+  --memory 2Gi \
+  --set-env-vars PACKET_DROPBOX_TOKEN_SERVICE_URL=https://... \
+  --set-env-vars PACKET_DROPBOX_SERVICE_SIGNATURE=930xY0dJ0pD \
+  --set-env-vars PACKET_GOOGLE_CREDENTIALS_PATH=/secrets/credentials.json
+
+# IMPORTANTE: Montar secret con service account credentials
+gcloud run services update pdf-packet-service \
+  --update-secrets /secrets/credentials.json=google-credentials:latest
 ```
 
-**Nota:** Asegúrate de aumentar el `--timeout` (ej. `300s` o `600s`) ya que el procesamiento de PDFs pesados puede tardar más que el valor por defecto (60s).
+## 🔧 Sistema de Slots
 
----
+### ¿Qué es un Slot?
 
-## 🔗 Uso de la API
+Un **slot** representa un documento esperado en el PDF final:
 
-### Endpoint principal
-
-* **Método:** `POST`
-* **Path:** `/api/v1/generate-packet`
-* **Uso típico:** llamado desde **Google Apps Script** u otros servicios.
-
-### Headers
-
-```http
-Content-Type: application/json
-```
-
-### Body (JSON request)
-
-```json
+```python
 {
-  "client_name": "Juan Perez",
-  "dropbox_url": "https://www.dropbox.com/sh/Ejemplo...",
-  "drive_parent_folder_id": "1QBrlti0mpJ_XFWif2...",
-  "sheet_output_config": {
-    "spreadsheet_id": "1UY6aPIkfap...",
-    "worksheet_name": "PREENSAMBLADO",
-    "folder_link_cell": "E5",
-    "missing_files_cell": "F5",
-    "pdf_link_cell": "G5"
-  }
+  "slot": 1,              # Posición en el PDF (1, 2, 3, ...)
+  "name": "Cover Page",   # Nombre descriptivo
+  "required": true,       # ¿Es obligatorio?
+  "folder_hint": "EXHIBIT 1",  # Carpeta donde buscar
+  "filename_patterns": ["cover*.pdf", "petition.pdf"],  # Patrones
+  "tags": ["important"]   # Etiquetas libres
 }
 ```
 
-📝 **Nota:** No es necesario enviar `dropbox_token`.
-El servicio lo obtiene automáticamente del microservicio `AccessTokenDropbox`.
+### Lógica de Resolución
 
-### Respuesta exitosa (`200 OK`)
+El `SlotResolver` mapea slots a archivos reales:
+
+1. **Filtro por carpeta**: Si `folder_hint` está presente, busca en carpetas que contengan ese texto
+2. **Filtro por patrones**: Si `filename_patterns` está presente, aplica wildcards o regex
+3. **Filtro por extensión**: Solo archivos `.pdf`
+4. **Selección**: Toma el primer candidato encontrado
+
+**Ejemplo:**
+
+```
+Dropbox structure:
+  /EXHIBIT 1/
+    cover.pdf         ← Match!
+    petition.pdf
+  /EXHIBIT 2/
+    abuse_doc.pdf
+
+Slot:
+  slot=1, folder_hint="EXHIBIT 1", patterns=["cover*.pdf"]
+
+Resolution:
+  ✅ Match: /EXHIBIT 1/cover.pdf
+```
+
+### Patrones soportados
+
+- **Literal**: `"petition.pdf"` → busca "petition" en el nombre
+- **Wildcard**: `"petition*.pdf"` → petition_v1.pdf, petition_final.pdf
+- **Regex**: `"regex:petition_[0-9]+\\.pdf"` → petition_1.pdf, petition_2.pdf
+
+## 🔄 Flujo de Integración con Enqueuer
+
+```
+┌─────────────┐      ┌─────────────┐      ┌──────────────────┐
+│ Apps Script │ ───> │  Enqueuer   │ ───> │  PDF Packet Svc  │
+└─────────────┘      └─────────────┘      └──────────────────┘
+       │                    │                       │
+       │ POST /enqueue      │ POST /process         │
+       │                    │                       │
+       └──── job_id ────────┘                       │
+                                                     │
+                           ┌─────────────────────────┘
+                           │
+                           ▼
+                    ┌──────────────┐      ┌────────────────┐
+                    │   Dropbox    │◄─────┤ Google Sheets  │
+                    │ (Descargas)  │      │  (Progreso)    │
+                    └──────────────┘      └────────────────┘
+```
+
+### Ejemplo de progreso reportado
+
+Durante `process_packet()`, el servicio actualiza la celda de status:
+
+```
+10% - Resolviendo archivos
+40% - Descargando archivos
+70% - Ensamblando PDF
+100% - Completado
+```
+
+## 📝 Ejemplo de Manifest VAWA
 
 ```json
 {
-  "status": "success",
-  "message": "Paquete generado correctamente.",
-  "drive_folder_link": "https://drive.google.com/...",
-  "final_pdf_link": "https://drive.google.com/...",
-  "missing_files": []
+  "manifest": [
+    {
+      "slot": 1,
+      "name": "Exhibit A – Cover",
+      "required": true,
+      "folder_hint": "EXHIBIT 1",
+      "filename_patterns": ["cover.pdf"]
+    },
+    {
+      "slot": 2,
+      "name": "Exhibit A – Petition",
+      "required": true,
+      "folder_hint": "EXHIBIT 1",
+      "filename_patterns": ["petition*.pdf"]
+    },
+    {
+      "slot": 3,
+      "name": "Exhibit B – Evidence",
+      "required": false,
+      "folder_hint": "EXHIBIT 2"
+    },
+    {
+      "slot": 4,
+      "name": "Exhibit C – Police Report",
+      "required": true,
+      "folder_hint": "EXHIBIT 3",
+      "filename_patterns": ["police*.pdf", "rap_sheet.pdf"]
+    },
+    {
+      "slot": 5,
+      "name": "Exhibit D – GMC Records",
+      "required": true,
+      "folder_hint": "EXHIBIT 4/GMC"
+    }
+  ]
 }
 ```
 
----
+## 🐛 Troubleshooting
 
-## 🧩 Lógica de negocio (Exhibits)
+### Error: "DropboxHandler not available"
+- Verificar que `PACKET_DROPBOX_TOKEN_SERVICE_URL` esté configurado
+- Verificar que el servicio `accesstokendropbox` esté corriendo
+- Verificar la firma `PACKET_DROPBOX_SERVICE_SIGNATURE`
 
-El orquestador sigue estrictamente el siguiente flujo de ensamblaje:
+### Error: "SheetsClient service not initialized"
+- Verificar que `PACKET_GOOGLE_CREDENTIALS_PATH` apunte al JSON válido
+- Verificar que el service account tenga permisos en la Sheet
+- Habilitar Google Sheets API en GCP Console
 
-1. **Validación inicial**
+### Error: "Failed to resolve Dropbox shared link"
+- Verificar que la URL sea un link compartido válido (`/scl/fo/...`)
+- Para cuentas de equipo, asegurar que el token tenga acceso al namespace correcto
 
-   * Verifica que existan las carpetas: `USCIS`, `VAWA` y `7` (Folder 7).
-   * Si falta alguna carpeta crítica, detiene el proceso y genera reporte.
+### PDFs corruptos
+- El servicio usa `pypdf` con `strict=False` para PDFs problemáticos
+- Si persiste, considerar migrar a `pikepdf` (requiere cambios en `pdf_assembler.py`)
 
-2. **Exhibit 1 – USCIS**
+## 📚 Estado del proyecto
 
-   * Busca documentos como:
+### ✅ Completado
 
-     * Prima Facie
-     * Transfer Notices
-     * Otros avisos relevantes de USCIS
+- Arquitectura por capas limpia
+- Integración completa con Dropbox (handler + token service)
+- SlotResolver funcional con folder hints y patrones
+- Google Sheets client con API v4
+- ProgressReporter integrado en el flujo
+- Cliente HTTP para servicio enqueuer
+- Manejo robusto de errores en endpoints
+- Documentación completa
 
-3. **Exhibit 2 – Faltantes**
+### 🚧 Próximos pasos
 
-   * Genera un resumen (hoja/listado) con lo que **no se encontró**.
-   * Este listado se incluye en el paquete y/o se escribe en Google Sheets.
+- [ ] Subir PDF final a Google Cloud Storage o Google Drive
+- [ ] Implementar retry logic para descargas fallidas
+- [ ] Agregar telemetría (Cloud Logging, Cloud Trace)
+- [ ] Tests unitarios y de integración
+- [ ] Documentación de manifiestos por tipo de caso (VAWA, asylum, etc.)
+- [ ] Soporte para otros proveedores de storage (Google Drive, AWS S3)
 
-4. **Exhibit 3 – Evidence**
+## 📄 Licencia
 
-   * Descarga recursivamente todo el contenido de la carpeta `VAWA/Evidence`.
-   * Convierte imágenes a PDF y las ensambla en el orden definido.
-
-5. **Exhibit 4 – Filed Copy**
-
-   * Busca el documento maestro (ej. filed packet) en la carpeta `7`.
-
----
-
-## 📞 Soporte y troubleshooting
-
-* Para problemas con **tokens de Dropbox**:
-
-  * Revisa los logs del servicio `AccessTokenDropbox`.
-
-* Para problemas de ensamblaje de paquetes:
-
-  * Revisa **Cloud Logging** filtrando por el nombre del servicio (ej. `vawa_service` o el `APP_NAME` configurado).
+Este proyecto es privado y de uso interno.

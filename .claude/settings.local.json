@@ -1,9 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dir:*)",
-      "Bash(python -m py_compile:*)",
-      "Bash(python verify_refactor.py:*)"
+      "Bash(dir:*)"
     ],
     "deny": [],
     "ask": []

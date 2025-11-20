@@ -1,108 +1,118 @@
-# app/integrations/dropbox_client.py
-import dropbox
-from dropbox.files import FileMetadata, FolderMetadata
-from dropbox.exceptions import ApiError
-from typing import List, Optional, Tuple
-from app.utils.helpers import normalize_text, sanitize_filename
-from app.utils.logger import logger # <-- IMPORTAR LOGGER
-import os
+from __future__ import annotations
 
-class DropboxIntegrator:
-    def __init__(self, token: str):
-        self.dbx = dropbox.Dropbox(token)
-    
-    def get_path_from_link(self, shared_link: str) -> Optional[str]:
+from typing import Iterable, Optional
+
+from config.settings import Settings
+from integrations.dropbox_handler import DropboxHandler
+from integrations.dropbox_token_client import DropboxTokenClient
+from logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class DropboxClient:
+    """
+    Cliente de alto nivel para Dropbox que maneja autenticación automática
+    y operaciones comunes de archivos/carpetas.
+
+    Obtiene tokens automáticamente desde el servicio accesstokendropbox
+    e inicializa el DropboxHandler.
+    """
+
+    def __init__(
+        self,
+        handler: Optional[DropboxHandler] = None,
+        token_client: Optional[DropboxTokenClient] = None,
+        settings: Optional[Settings] = None,
+    ) -> None:
+        """
+        Args:
+            handler: DropboxHandler ya inicializado (para testing/DI)
+            token_client: Cliente de tokens (para testing/DI)
+            settings: Settings de la app (para obtener URLs de servicios)
+        """
+        self.settings = settings or Settings()
+        self._handler = handler
+        self._token_client = token_client
+
+        # Lazy initialization: solo inicializar handler cuando se necesite
+        if self._handler is None and self.settings.dropbox_token_service_url:
+            self._initialize_handler()
+
+    def _initialize_handler(self) -> None:
+        """Inicializa el handler obteniendo un token fresco del servicio."""
         try:
-            metadata = self.dbx.sharing_get_shared_link_metadata(shared_link)
-            return getattr(metadata, 'path_lower', None)
+            if self._token_client is None:
+                self._token_client = DropboxTokenClient(
+                    service_url=self.settings.dropbox_token_service_url
+                )
+
+            # Obtener token usando signature de settings
+            token_response = self._token_client.get_token(
+                signature=self.settings.dropbox_service_signature,
+                service=self.settings.app_name,
+            )
+
+            if token_response and token_response.access_token:
+                self._handler = DropboxHandler(access_token=token_response.access_token)
+                logger.info("DropboxHandler initialized successfully")
+            else:
+                logger.error("Failed to obtain Dropbox token, handler not initialized")
+
         except Exception as e:
-            logger.error(f"❌ Error resolviendo link Dropbox: {e}") # <-- USO DE LOGGER
+            logger.error("Error initializing DropboxHandler: %s", e)
+            self._handler = None
+
+    @property
+    def handler(self) -> Optional[DropboxHandler]:
+        """Lazy getter para el handler."""
+        if self._handler is None:
+            self._initialize_handler()
+        return self._handler
+
+    def resolve_shared_link(self, shared_link: str) -> Optional[str]:
+        """
+        Resuelve un link compartido de Dropbox a su ruta interna.
+
+        Args:
+            shared_link: URL del link compartido
+
+        Returns:
+            Ruta interna (path_lower) o None si falla
+        """
+        if not self.handler:
+            logger.warning("DropboxHandler not available, cannot resolve link")
             return None
+        return self.handler.get_folder_path_from_shared_link(shared_link)
 
-    def list_folder(self, path: str) -> List:
-        entries = []
-        try:
-            res = self.dbx.files_list_folder(path)
-            entries.extend(res.entries)
-            while res.has_more:
-                # logger.debug(f"Paginando carpeta: {path}...") # Opcional para debug
-                res = self.dbx.files_list_folder_continue(res.cursor)
-                entries.extend(res.entries)
-        except ApiError as e:
-            logger.warning(f"⚠️ Error listando carpeta {path}: {e}")
-        return entries
+    def list_folder(self, folder_path: str, recursive: bool = False) -> Iterable:
+        """
+        Lista archivos y carpetas en una ruta de Dropbox.
 
-    def find_folder_fuzzy(self, base_path: str, keywords: List[str]) -> Optional[str]:
-        keywords_norm = [normalize_text(k) for k in keywords]
-        entries = self.list_folder(base_path)
-        
-        for entry in entries:
-            if isinstance(entry, FolderMetadata):
-                name_norm = normalize_text(entry.name)
-                if any(kw in name_norm for kw in keywords_norm):
-                    logger.info(f"✅ Carpeta encontrada: {entry.name}")
-                    return entry.path_lower
-        return None
+        Args:
+            folder_path: Ruta de la carpeta en Dropbox
+            recursive: Si es True, lista recursivamente
 
-    def validate_vawa_structure(self, root_path: str) -> Tuple[bool, List[str]]:
-        logger.info(f"🔍 Validando estructura VAWA en: {root_path}")
-        missing = []
-        
-        # 1. Buscar Exhibit 1 (USCIS)
-        uscis = self.find_folder_fuzzy(root_path, ['USCIS', 'UCIS', 'Receipts'])
-        if not uscis: missing.append("Carpeta USCIS/Receipts")
+        Returns:
+            Lista de entries (FileMetadata/FolderMetadata)
+        """
+        if not self.handler:
+            logger.warning("DropboxHandler not available, cannot list folder")
+            return []
+        return self.handler.list_folder_contents(folder_path, recursive=recursive)
 
-        # 2. Buscar Exhibit 3 (VAWA -> Evidence)
-        vawa = self.find_folder_fuzzy(root_path, ['VAWA'])
-        if vawa:
-            evidence = self.find_folder_fuzzy(vawa, ['Evidence'])
-            if not evidence: missing.append("Subcarpeta 'Evidence' dentro de VAWA")
-        else:
-            missing.append("Carpeta VAWA")
+    def download_file(self, remote_path: str, local_folder: str) -> Optional[str]:
+        """
+        Descarga un archivo de Dropbox.
 
-        # 3. Buscar Exhibit 4 (Carpeta 7)
-        folder_7 = self.find_folder_fuzzy(root_path, ['7', 'Folder7'])
-        if not folder_7: missing.append("Carpeta 7 (Filed Copy)")
+        Args:
+            remote_path: Ruta del archivo en Dropbox
+            local_folder: Carpeta local de destino
 
-        is_valid = len(missing) == 0
-        if not is_valid:
-            logger.warning(f"❌ Validación fallida. Faltan: {missing}")
-        
-        return is_valid, missing
-
-    def download_file(self, dropbox_path: str, local_dest_folder: str) -> Optional[str]:
-        try:
-            os.makedirs(local_dest_folder, exist_ok=True)
-            file_name = sanitize_filename(os.path.basename(dropbox_path))
-            local_path = os.path.join(local_dest_folder, file_name)
-            
-            logger.info(f"⬇️ Descargando: {file_name}")
-            self.dbx.files_download_to_file(local_path, dropbox_path)
-            return local_path
-        except Exception as e:
-            logger.error(f"❌ Error descargando {dropbox_path}: {e}")
+        Returns:
+            Ruta local del archivo descargado o None si falla
+        """
+        if not self.handler:
+            logger.warning("DropboxHandler not available, cannot download file")
             return None
-            
-    def find_files_recursive_fuzzy(self, folder_path: str, keywords: List[str], stop_on_first: bool = False):
-        found = []
-        normalized_kws = [normalize_text(k) for k in keywords]
-        
-        try:
-            entries = self.list_folder(folder_path)
-            for entry in entries:
-                if isinstance(entry, FileMetadata):
-                    norm_name = normalize_text(entry.name)
-                    # Si keywords es [''], coincide con todo (wildcard)
-                    if keywords == [''] or any(kw in norm_name for kw in normalized_kws):
-                        found.append(entry)
-                        if stop_on_first: return found
-                
-                elif isinstance(entry, FolderMetadata):
-                    sub_found = self.find_files_recursive_fuzzy(entry.path_lower, keywords, stop_on_first)
-                    found.extend(sub_found)
-                    if stop_on_first and found: return found
-                    
-        except Exception as e:
-            logger.error(f"⚠️ Error en búsqueda recursiva {folder_path}: {e}")
-            
-        return found
+        return self.handler.download_file(remote_path, local_folder)
