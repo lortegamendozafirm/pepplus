@@ -29,3 +29,5 @@ dist/
 
 # Logs
 *.log
+token.json
+credentials.json
