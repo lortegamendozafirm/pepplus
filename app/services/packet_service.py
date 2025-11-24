@@ -1,18 +1,27 @@
+# app/services/packet_service.py
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Iterable, Optional
 from uuid import uuid4
+from dropbox.files import FileMetadata
+from reportlab.lib.pagesizes import LETTER
+from reportlab.pdfgen import canvas
+from docx2pdf import convert as docx2pdf_convert
+import shutil
+import re
 
-from domain.manifest import Manifest
-from domain.packet import Packet
-from domain.slot_resolution import SlotResolution, SlotResolver
-from integrations.dropbox_client import DropboxClient
-from integrations.enqueuer_client import EnqueuerClient
-from integrations.sheets_client import SheetsClient
-from logger import get_logger
-from pdf.pdf_assembler import merge_pdfs_in_order
-from services.progress_reporter import ProgressReporter
+from app.domain.manifest import Manifest
+from app.domain.packet import Packet
+from app.domain.slot_resolution import SlotResolution, SlotResolver
+from app.domain.slot import Slot
+from app.integrations.dropbox_client import DropboxClient
+from app.integrations.enqueuer_client import EnqueuerClient
+from app.integrations.sheets_client import SheetsClient
+from app.logger import get_logger
+from app.pdf.pdf_assembler import merge_pdfs_in_order
+from app.services.progress_reporter import ProgressReporter
+
 
 logger = get_logger(__name__)
 
@@ -35,7 +44,9 @@ class PacketService:
         self.slot_resolver = slot_resolver or SlotResolver()
         self.enqueuer_client = enqueuer_client
         self.temp_dir = Path(temp_dir)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.progress = ProgressReporter(sheets_client) if sheets_client else None
+        
 
     def enqueue_packet(self, packet: Packet) -> str:
         """
@@ -96,6 +107,7 @@ class PacketService:
                     "name": slot.name,
                     "required": slot.required,
                     "folder_hint": slot.meta.folder_hint,
+                    "file_hint": slot.meta.file_hint,              # ⬅️ NUEVO
                     "filename_patterns": slot.meta.filename_patterns,
                     "tags": slot.meta.tags,
                 }
@@ -207,17 +219,20 @@ class PacketService:
             return []
 
         logger.info("Building files index for: %s", folder_path)
-        entries = self.dropbox_client.list_folder(folder_path, recursive=True)
+        entries = list(self.dropbox_client.list_folder(folder_path, recursive=True))
 
-        # Filtrar solo archivos (no carpetas) y obtener sus paths
-        file_paths = []
+        file_paths: list[str] = []
         for entry in entries:
-            # dropbox entries tienen .path_lower y un atributo para distinguir tipo
-            if hasattr(entry, 'path_lower') and not isinstance(entry, type(entry).__bases__[0]):
-                # Es un archivo (FileMetadata)
+            # Solo archivos
+            if isinstance(entry, FileMetadata):
+                # path_lower viene en minúsculas → ideal para comparaciones case-insensitive
                 file_paths.append(entry.path_lower)
 
-        logger.info("Files index built: %d files", len(file_paths))
+        logger.info(
+            "Files index built: %d files (of %d total entries)",
+            len(file_paths),
+            len(entries),
+        )
         return file_paths
 
     def _resolve_slots(self, manifest: Manifest, files_index: list[str]) -> list[SlotResolution]:
@@ -227,22 +242,23 @@ class PacketService:
 
     def _download_resolved(
         self, resolutions: Iterable[SlotResolution], client_name: str
-    ) -> list[tuple[int, str]]:
+    ) -> list[tuple[Slot, str]]:
         """
         Descarga los archivos resueltos a disco local.
 
         Returns:
-            Lista de tuplas (slot_number, local_path)
+            Lista de tuplas (slot, local_path)
         """
         if not self.dropbox_client:
             logger.error("DropboxClient not available")
             return []
 
-        # Crear carpeta temporal para este cliente
-        client_folder = self.temp_dir / client_name.replace(' ', '_')
-        client_folder.mkdir(parents=True, exist_ok=True)
+        # Crear / limpiar carpeta temporal para este cliente
+        client_folder = self._prepare_client_folder(client_name)
 
-        downloaded = []
+
+
+        downloaded: list[tuple[Slot, str]] = []
         for resolution in resolutions:
             if resolution.missing or not resolution.candidate_path:
                 logger.debug("Skipping missing slot %d", resolution.slot.slot)
@@ -254,39 +270,161 @@ class PacketService:
             )
 
             if local_path:
-                downloaded.append((resolution.slot.slot, local_path))
-                logger.info("Downloaded slot %d: %s", resolution.slot.slot, local_path)
+                downloaded.append((resolution.slot, local_path))
+                logger.info(
+                    "Downloaded slot %d (%s): %s",
+                    resolution.slot.slot,
+                    resolution.slot.name,
+                    local_path,
+                )
             else:
-                logger.error("Failed to download slot %d from %s", resolution.slot.slot, resolution.candidate_path)
+                logger.error(
+                    "Failed to download slot %d from %s",
+                    resolution.slot.slot,
+                    resolution.candidate_path,
+                )
 
         logger.info("Downloaded %d/%d files", len(downloaded), len(list(resolutions)))
         return downloaded
 
-    def _merge(self, downloaded: list[tuple[int, str]], client_name: str) -> Optional[Path]:
+
+    def _merge(self, downloaded: list[tuple[Slot, str]], client_name: str) -> Optional[Path]:
         """
-        Ensambla los PDFs descargados en orden de slot.
-
-        Args:
-            downloaded: Lista de (slot_number, local_path)
-            client_name: Nombre del cliente (para nombre de archivo)
-
-        Returns:
-            Path del PDF final ensamblado
+        Ensambla los PDFs descargados en orden de slot, insertando
+        una hoja separadora por cada grupo de slots con el mismo name.
+        También soporta DOCX convirtiéndolos previamente a PDF.
         """
         if not downloaded:
             logger.warning("No files to merge, skipping PDF assembly")
             return None
 
-        # Ordenar por slot number
-        sorted_files = sorted(downloaded, key=lambda x: x[0])
-        local_paths = [path for _, path in sorted_files]
+        # Ordenar por número de slot
+        sorted_files = sorted(downloaded, key=lambda x: x[0].slot)
 
-        # Nombre del archivo de salida
+        final_paths: list[str] = []
+        current_group_name: Optional[str] = None
+
+        for slot, original_path in sorted_files:
+            group_name = slot.name  # p.ej. "Exhibit 1", "Exhibit 3", etc.
+
+            # Si cambia el grupo, insertar hoja separadora
+            if group_name != current_group_name:
+                current_group_name = group_name
+                separator_path = self._create_separator_pdf(
+                    title=group_name,
+                    client_name=client_name,
+                )
+                if separator_path:
+                    final_paths.append(separator_path)
+                    logger.info(
+                        "Inserted separator page for group '%s': %s",
+                        group_name,
+                        separator_path,
+                    )
+
+            # Asegurar que el archivo sea PDF (convertir si es DOCX)
+            pdf_path = self._ensure_pdf(original_path)
+            if not pdf_path:
+                logger.error(
+                    "Skipping file for slot %d (%s): could not ensure PDF from %s",
+                    slot.slot,
+                    slot.name,
+                    original_path,
+                )
+                continue
+
+            final_paths.append(pdf_path)
+
+        if not final_paths:
+            logger.warning("No files (after grouping) to merge, skipping PDF assembly")
+            return None
+
         safe_client_name = client_name.replace(' ', '_').replace('/', '_')
         output_path = self.temp_dir / f"packet_{safe_client_name}.pdf"
 
-        logger.info("Merging %d PDFs into %s", len(local_paths), output_path)
-        merge_pdfs_in_order(local_paths, str(output_path))
+        logger.info("Merging %d PDFs into %s", len(final_paths), output_path)
+        merge_pdfs_in_order(final_paths, str(output_path))
         logger.info("Merged PDF written to %s", output_path)
 
         return output_path
+
+
+    def _create_separator_pdf(self, title: str, client_name: str) -> Optional[str]:
+        """
+        Crea un PDF de una sola página con un título grande centrado.
+
+        Devuelve la ruta local del PDF generado.
+        """
+        try:
+            safe_client_name = client_name.replace(' ', '_').replace('/', '_')
+            safe_title = re.sub(r"[^a-zA-Z0-9_\-]+", "_", title)
+            filename = f"separator_{safe_client_name}_{safe_title}.pdf"
+            output_path = self.temp_dir / filename
+
+            c = canvas.Canvas(str(output_path), pagesize=LETTER)
+            width, height = LETTER
+
+            # Título grande centrado
+            font_name = "Helvetica-Bold"
+            font_size = 28
+            c.setFont(font_name, font_size)
+
+            text = title.upper()
+            text_width = c.stringWidth(text, font_name, font_size)
+            x = (width - text_width) / 2.0
+            y = height / 2.0
+
+            c.drawString(x, y, text)
+
+            c.showPage()
+            c.save()
+
+            return str(output_path)
+        except Exception as e:
+            logger.error("Error creating separator PDF for '%s': %s", title, e)
+            return None
+    def _ensure_pdf(self, path: str) -> Optional[str]:
+        """
+        Si el archivo ya es PDF, lo devuelve tal cual.
+        Si es DOCX, intenta convertirlo a PDF y devuelve la ruta del PDF.
+        Si falla, devuelve None.
+        """
+        lower = path.lower()
+        if lower.endswith(".pdf"):
+            return path
+
+        if lower.endswith(".docx"):
+            try:
+                # Generar ruta destino con misma base pero .pdf
+                output_path = str(Path(path).with_suffix(".pdf"))
+                logger.info("Converting DOCX to PDF: %s -> %s", path, output_path)
+                docx2pdf_convert(path, output_path)
+                return output_path
+            except Exception as e:
+                logger.error("Error converting DOCX to PDF (%s): %s", path, e)
+                return None
+
+        # Otros tipos de archivo no soportados para el packet final
+        logger.warning("Unsupported file type for merge (only pdf/docx): %s", path)
+        return None
+    def _prepare_client_folder(self, client_name: str) -> Path:
+        """
+        Prepara la carpeta temporal del cliente:
+        - Normaliza el nombre.
+        - Si ya existe, la borra completa.
+        - La vuelve a crear vacía.
+
+        Así evitamos quedarnos con PDFs DOCX->PDF rotos de corridas anteriores.
+        """
+        safe_client_name = client_name.replace(' ', '_').replace('/', '_')
+        client_folder = self.temp_dir / safe_client_name
+
+        if client_folder.exists():
+            try:
+                shutil.rmtree(client_folder)
+                logger.info("Cleaned previous temp folder for %s: %s", client_name, client_folder)
+            except Exception as e:
+                logger.error("Could not clean temp folder %s: %s", client_folder, e)
+
+        client_folder.mkdir(parents=True, exist_ok=True)
+        return client_folder

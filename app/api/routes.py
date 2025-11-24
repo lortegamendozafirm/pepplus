@@ -1,15 +1,16 @@
+# app/api/routes.py
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from api.schemas import PacketRequest, PacketResponse
-from config.settings import Settings
-from domain.manifest import Manifest
-from domain.packet import Packet, SheetOutputConfig, SheetPosition
-from domain.slot import Slot, SlotMeta
-from integrations.dropbox_client import DropboxClient
-from integrations.enqueuer_client import EnqueuerClient
-from integrations.sheets_client import SheetsClient
-from logger import get_logger
-from services.packet_service import PacketService
+from app.api.schemas import PacketRequest, PacketResponse
+from app.config.settings import Settings
+from app.domain.manifest import Manifest
+from app.domain.packet import Packet, SheetOutputConfig, SheetPosition
+from app.domain.slot import Slot, SlotMeta
+from app.integrations.dropbox_client import DropboxClient
+from app.integrations.enqueuer_client import EnqueuerClient
+from app.integrations.sheets_client import SheetsClient
+from app.logger import get_logger
+from app.services.packet_service import PacketService
 
 logger = get_logger(__name__)
 
@@ -154,11 +155,19 @@ def build_domain_packet(api_request: PacketRequest) -> Packet:
 
             meta = SlotMeta(
                 folder_hint=slot.folder_hint,
+                file_hint=getattr(slot, "file_hint", None),  # ⬅️ NUEVO
                 filename_patterns=slot.filename_patterns,
-                tags=slot.tags
+                tags=slot.tags,
+                allow_docx=slot.allow_docx,
             )
+
             manifest_slots.append(
-                Slot(slot=slot.slot, name=slot.name, required=slot.required, meta=meta)
+                Slot(
+                    slot=slot.slot,
+                    name=slot.name,
+                    required=slot.required,
+                    meta=meta,
+                )
             )
 
         manifest = Manifest(manifest_slots)

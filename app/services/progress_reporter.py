@@ -1,5 +1,5 @@
-from domain.packet import SheetOutputConfig, SheetPosition
-from integrations.sheets_client import SheetsClient
+from app.domain.packet import SheetOutputConfig, SheetPosition
+from app.integrations.sheets_client import SheetsClient
 
 
 class ProgressReporter:

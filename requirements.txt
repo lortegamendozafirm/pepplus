@@ -8,6 +8,8 @@ pydantic-settings>=2.2.1
 
 # PDF manipulation
 pypdf>=4.2.0
+reportlab
+docx2pdf 
 
 # Dropbox integration
 dropbox>=12.0.0

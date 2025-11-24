@@ -1,11 +1,14 @@
+# app/integrations/dropbox/dropbox_client.py
 from __future__ import annotations
+import re
 
-from typing import Iterable, Optional
+from typing import Iterable, Optional, List
+from dropbox.files import FolderMetadata, FileMetadata
 
-from config.settings import Settings
-from integrations.dropbox_handler import DropboxHandler
-from integrations.dropbox_token_client import DropboxTokenClient
-from logger import get_logger
+from app.config.settings import Settings
+from app.integrations.dropbox_handler import DropboxHandler
+from app.integrations.dropbox_token_client import DropboxTokenClient
+from app.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -116,3 +119,151 @@ class DropboxClient:
             logger.warning("DropboxHandler not available, cannot download file")
             return None
         return self.handler.download_file(remote_path, local_folder)
+
+    @staticmethod
+    def _normalize_name(name: str) -> str:
+        """
+        Normaliza nombres de carpeta/archivo:
+        - lower()
+        - quita dobles espacios
+        - reemplaza guiones bajos por espacios
+        """
+        n = name.lower()
+        n = n.replace("_", " ")
+        # colapsar espacios múltiples
+        n = re.sub(r"\s+", " ", n)
+        return n.strip()
+
+    def find_folders_by_pattern(
+        self,
+        root_path: str,
+        pattern: str,
+        use_regex: bool = True,
+    ) -> List[str]:
+        """
+        Busca carpetas debajo de root_path cuyo nombre matchee un patrón.
+
+        Args:
+            root_path: Carpeta raíz donde empezar a buscar.
+            pattern: patrón a buscar (regex o substring normalizado).
+            use_regex: si True, se trata como regex sobre el nombre normalizado.
+
+        Returns:
+            Lista de paths (path_lower) de carpetas que coinciden.
+        """
+        if not self.handler:
+            logger.warning("DropboxHandler not available, cannot search folders")
+            return []
+
+        entries = self.list_folder(root_path, recursive=True)
+        norm_pattern = pattern.lower()
+
+        regex = None
+        if use_regex:
+            # regex sobre nombre normalizado
+            regex = re.compile(norm_pattern, re.IGNORECASE)
+
+        matches: List[str] = []
+
+        for entry in entries:
+            if isinstance(entry, FolderMetadata):
+                norm_name = self._normalize_name(entry.name)
+                if use_regex:
+                    if regex.search(norm_name):
+                        matches.append(entry.path_lower)
+                else:
+                    if norm_pattern in norm_name:
+                        matches.append(entry.path_lower)
+
+        logger.info(
+            "find_folders_by_pattern root=%s pattern='%s' -> %d matches",
+            root_path,
+            pattern,
+            len(matches),
+        )
+        return matches
+
+    def find_files_by_pattern(
+        self,
+        root_path: str,
+        file_pattern: str,
+        folder_pattern: Optional[str] = None,
+        folder_use_regex: bool = True,
+        file_use_regex: bool = True,
+        only_pdf: bool = True,
+    ) -> List[str]:
+        """
+        Busca archivos cuyo nombre matchee un patrón, opcionalmente
+        restringiendo primero por carpetas que matcheen otro patrón.
+
+        Flujo:
+        - Si folder_pattern está definido:
+            - buscar carpetas matching bajo root_path
+            - buscar archivos solo dentro de esas carpetas
+        - Si no:
+            - buscar archivos bajo root_path recursivo
+
+        Args:
+            root_path: Carpeta raíz de búsqueda.
+            file_pattern: patrón para el nombre de archivo.
+            folder_pattern: patrón para nombre de carpeta (opcional).
+            folder_use_regex: si True, patrón de carpeta como regex.
+            file_use_regex: si True, patrón de archivo como regex.
+            only_pdf: si True, filtrar a .pdf
+
+        Returns:
+            Lista de paths (path_lower) de archivos matching.
+        """
+        if not self.handler:
+            logger.warning("DropboxHandler not available, cannot search files")
+            return []
+
+        entries = list(self.list_folder(root_path, recursive=True))
+
+        # 1) Si hay patrón de carpeta, filtrar primero carpetas candidatas
+        candidate_folder_paths: Optional[List[str]] = None
+        if folder_pattern:
+            candidate_folder_paths = self.find_folders_by_pattern(
+                root_path=root_path,
+                pattern=folder_pattern,
+                use_regex=folder_use_regex,
+            )
+
+        # Precompilar patrón de archivos
+        norm_file_pattern = file_pattern.lower()
+        file_regex = None
+        if file_use_regex:
+            file_regex = re.compile(norm_file_pattern, re.IGNORECASE)
+
+        def file_matches(entry: FileMetadata) -> bool:
+            name_norm = self._normalize_name(entry.name)
+            if only_pdf and not name_norm.endswith(".pdf"):
+                return False
+            if file_use_regex:
+                return bool(file_regex.search(name_norm))
+            else:
+                return norm_file_pattern in name_norm
+
+        matches: List[str] = []
+
+        for entry in entries:
+            if not isinstance(entry, FileMetadata):
+                continue
+
+            # Restringir por carpeta si aplica
+            if candidate_folder_paths:
+                # path_lower inicia con una de las carpetas candidatas
+                if not any(entry.path_lower.startswith(folder) for folder in candidate_folder_paths):
+                    continue
+
+            if file_matches(entry):
+                matches.append(entry.path_lower)
+
+        logger.info(
+            "find_files_by_pattern root=%s folder_pattern='%s' file_pattern='%s' -> %d matches",
+            root_path,
+            folder_pattern,
+            file_pattern,
+            len(matches),
+        )
+        return matches

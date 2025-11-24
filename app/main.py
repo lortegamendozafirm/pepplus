@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 
-from api.routes import router as packets_router
-from config.settings import Settings
+from app.api.routes import router as packets_router
+from app.config.settings import Settings
 
 
 def create_app() -> FastAPI:

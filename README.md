@@ -40,6 +40,220 @@ app/
 └── logger.py        # Logging configurado
 ```
 
+### 1) Vista general (flujo funcional)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Cliente (Apps Script/Thunder)
+    participant API as FastAPI (Cloud Run)
+    participant ENQ as Servicio Enqueuer
+    participant CFG as config/settings.py
+    participant PKT as services/packet_service.py
+    participant DBX as Dropbox API
+    participant TOK as Token Service
+    participant RES as domain/slot_resolution.py
+    participant PDF as pdf/pdf_assembler.py
+    participant SHT as Google Sheets API
+    participant GCS as Cloud Storage (futuro)
+
+    Note over U,API: POST /api/v1/packets/enqueue
+    U->>API: {client_name, dropbox_url, manifest, sheet_config}
+
+    Note over API,CFG: 1) Validación y configuración
+    API->>CFG: Cargar settings (temp_dir, credentials, enqueuer_url)
+    CFG-->>API: Settings válidos
+
+    Note over API,PKT: 2) Construcción del dominio
+    API->>API: build_domain_packet() (routes.py)
+    API->>PKT: enqueue_packet(packet)
+
+    Note over PKT,ENQ: 3) Encolado asíncrono
+    PKT->>ENQ: POST /enqueue {service_name, endpoint, payload}
+    ENQ-->>PKT: job_id
+    PKT-->>API: job_id
+    API-->>U: 202 Accepted {status: "enqueued", job_id}
+
+    Note over ENQ,API: 4) Procesamiento asíncrono (llamado por enqueuer)
+    ENQ->>API: POST /api/v1/packets/process {packet}
+    API->>PKT: process_packet(packet)
+
+    Note over PKT,SHT: 5) Reporte inicial (10%)
+    PKT->>SHT: write_status("10% - Resolviendo archivos")
+
+    Note over PKT,TOK: 6) Obtener token de Dropbox
+    PKT->>DBX: resolve_shared_link(dropbox_url)
+    DBX->>TOK: Solicitar access token
+    TOK-->>DBX: Access token válido
+    DBX-->>PKT: folder_path interno
+
+    Note over PKT,DBX: 7) Listar archivos en carpeta
+    PKT->>DBX: list_folder(folder_path, recursive=True)
+    DBX-->>PKT: files_index (lista de paths)
+
+    Note over PKT,RES: 8) Resolución de slots
+    PKT->>RES: resolve(manifest.slots, files_index)
+    RES->>RES: Filtrar por folder_hint, filename_patterns
+    RES-->>PKT: SlotResolution[] (matched_paths)
+
+    alt Faltan slots requeridos
+        PKT->>SHT: write_status("ERROR - Faltan slots requeridos")
+        PKT-->>API: {status: "error", missing_required: [...]}
+        API-->>ENQ: 200 OK (error response)
+    else Todos los slots OK
+        Note over PKT,SHT: 9) Reporte descarga (40%)
+        PKT->>SHT: write_status("40% - Descargando archivos")
+
+        Note over PKT,DBX: 10) Descarga de PDFs
+        loop Para cada slot resuelto
+            PKT->>DBX: download_file(candidate_path, temp_dir)
+            DBX-->>PKT: local_path
+        end
+
+        Note over PKT,SHT: 11) Reporte ensamblado (70%)
+        PKT->>SHT: write_status("70% - Ensamblando PDF")
+
+        Note over PKT,PDF: 12) Ensamblado de PDFs
+        PKT->>PDF: merge_pdfs_in_order(local_paths[], output_path)
+        PDF-->>PKT: output_path (temp file)
+
+        Note over PKT,SHT: 13) Reporte final (100%)
+        PKT->>SHT: write_status("100% - Completado")
+        PKT->>SHT: write_output_url(output_path)
+
+        Note over PKT,GCS: 14) (Futuro) Subir a Cloud Storage
+        PKT->>GCS: upload_file(output_path)
+        GCS-->>PKT: public_url
+
+        PKT-->>API: {status: "ok", output_path, mask}
+        API-->>ENQ: 200 OK
+    end
+```
+
+### 2) Vista técnica (módulos y dependencias)
+
+```mermaid
+graph LR
+  %% --- Capas internas ---
+  subgraph API["Capa API"]
+    M[[app/main.py]]
+    RT[[app/api/routes.py]]
+    SCH[[app/api/schemas.py]]
+  end
+
+  subgraph SVC["Servicios"]
+    PKT[[app/services/packet_service.py]]
+    PRG[[app/services/progress_reporter.py]]
+  end
+
+  subgraph DOM["Dominio"]
+    SL[[app/domain/slot.py]]
+    MAN[[app/domain/manifest.py]]
+    PAC[[app/domain/packet.py]]
+    RES[[app/domain/slot_resolution.py]]
+  end
+
+  subgraph INT["Integraciones"]
+    DBXC[[app/integrations/dropbox_client.py]]
+    DBXH[[app/integrations/dropbox_handler.py]]
+    DBXT[[app/integrations/dropbox_token_client.py]]
+    SHC[[app/integrations/sheets_client.py]]
+    ENQ[[app/integrations/enqueuer_client.py]]
+  end
+
+  subgraph PDF_["PDF"]
+    ASM[[app/pdf/pdf_assembler.py]]
+  end
+
+  subgraph CORE["Core"]
+    CFG[[app/config/settings.py]]
+    LOG[[app/logger.py]]
+  end
+
+  %% Relaciones internas
+  M --> RT
+  RT --> SCH
+  RT --> PKT
+  RT --> ENQ
+  RT --> DBXC
+  RT --> SHC
+  RT --> CFG
+
+  PKT --> RES
+  PKT --> MAN
+  PKT --> PAC
+  PKT --> DBXC
+  PKT --> SHC
+  PKT --> ENQ
+  PKT --> PRG
+  PKT --> ASM
+
+  PRG --> SHC
+
+  MAN --> SL
+  PAC --> MAN
+  RES --> SL
+
+  DBXC --> DBXH
+  DBXC --> DBXT
+  DBXH --> DBXT
+
+  %% Core dependencies
+  RT --> LOG
+  PKT --> LOG
+  DBXC --> LOG
+  DBXH --> LOG
+  SHC --> LOG
+  ENQ --> LOG
+  PRG --> LOG
+
+  M --> CFG
+  PKT --> CFG
+  DBXH --> CFG
+  SHC --> CFG
+
+  %% --- Servicios externos ---
+  subgraph EXT["Servicios Externos"]
+    CR[[Cloud Run]]
+    SA[[Service Account]]
+    DBX_API[(Dropbox API)]
+    TOK_SVC[(Token Service)]
+    SHT_API[(Google Sheets API)]
+    ENQ_SVC[(Enqueuer Service)]
+    GCS[(Cloud Storage - futuro)]
+  end
+
+  %% Conexiones externas
+  M -. despliegue .-> CR
+  CR -. usa .-> SA
+
+  DBXH --> DBX_API
+  DBXT --> TOK_SVC
+  SHC --> SHT_API
+  ENQ --> ENQ_SVC
+
+  SA -. credenciales .- SHC
+  SA -. scopes .- SHT_API
+  TOK_SVC -. access_token .- DBX_API
+
+  %% Estilos
+  classDef api fill:#e3f2fd,stroke:#1e88e5,color:#0d47a1
+  classDef svc fill:#e8f5e9,stroke:#43a047,color:#1b5e20
+  classDef dom fill:#fff8e1,stroke:#f9a825,color:#f57f17
+  classDef int fill:#ede7f6,stroke:#5e35b1,color:#311b92
+  classDef pdf fill:#f1f8e9,stroke:#7cb342,color:#33691e
+  classDef core fill:#f3e5f5,stroke:#8e24aa,color:#4a148c
+  classDef ext fill:#eceff1,stroke:#607d8b,color:#37474f
+
+  class M,RT,SCH api
+  class PKT,PRG svc
+  class SL,MAN,PAC,RES dom
+  class DBXC,DBXH,DBXT,SHC,ENQ int
+  class ASM pdf
+  class CFG,LOG core
+  class CR,SA,DBX_API,TOK_SVC,SHT_API,ENQ_SVC,GCS ext
+```
+
 ## 🚀 Endpoints
 
 ### `POST /api/v1/packets/enqueue`

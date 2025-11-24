@@ -31,3 +31,6 @@ dist/
 *.log
 token.json
 credentials.json
+sa.json
+.tests/
+tests/

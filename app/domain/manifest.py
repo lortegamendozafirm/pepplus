@@ -1,7 +1,8 @@
+# app/domain/manifest.py
 from dataclasses import dataclass
 from typing import Iterable, List
 
-from domain.slot import Slot
+from app.domain.slot import Slot
 
 
 @dataclass

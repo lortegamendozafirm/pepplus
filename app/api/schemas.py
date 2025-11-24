@@ -1,3 +1,4 @@
+# app/api/schemas.py
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
@@ -18,9 +19,27 @@ class ManifestSlot(BaseModel):
     slot: int = Field(..., description="Posición entera en el PDF final.")
     name: str = Field(..., description="Nombre lógico del slot.")
     required: bool = Field(True, description="Indica si el slot es obligatorio.")
-    folder_hint: Optional[str] = Field(None, description="Pista de carpeta para resolver el archivo.")
-    filename_patterns: List[str] = Field(default_factory=list, description="Posibles patrones de archivo.")
+
+    # NUEVO: hint para carpeta y archivo
+    folder_hint: Optional[str] = Field(
+        None,
+        description="Pista de carpeta para resolver el archivo (ej: 'uscis receipts notices', 'vawa').",
+    )
+    file_hint: Optional[str] = Field(
+        None,
+        description="Pista de nombre de archivo dentro de la carpeta (ej: 'prima facie renewed', 'pcl carolina').",
+    )
+
+    # Legacy / opcional
+    filename_patterns: List[str] = Field(
+        default_factory=list,
+        description="Posibles patrones de archivo (wildcards/regex) para compatibilidad.",
+    )
     tags: List[str] = Field(default_factory=list, description="Etiquetas libres.")
+    allow_docx: bool = Field(
+        False,
+        description="Si es True, también se permiten archivos .docx para este slot."
+    )
 
 
 class PacketRequest(BaseModel):

@@ -1,7 +1,8 @@
+# app/domain/packet.py
 from dataclasses import dataclass
 from typing import Optional
 
-from domain.manifest import Manifest
+from app.domain.manifest import Manifest
 
 
 @dataclass(frozen=True)
