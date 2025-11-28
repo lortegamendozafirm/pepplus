@@ -56,3 +56,71 @@ class PacketResponse(BaseModel):
     status: str
     message: str
     job_id: Optional[str] = None
+
+
+# ========================================
+# OCR Extract Endpoint Schemas
+# ========================================
+
+
+class OcrExtractRequest(BaseModel):
+    """
+    Request schema para el endpoint de extracción OCR.
+    """
+    input_pdf_path: str = Field(
+        ...,
+        description="Ruta absoluta o relativa del PDF ya descargado en el servidor.",
+    )
+    pattern: str = Field(
+        ...,
+        description="Texto o expresión regular a buscar en las páginas del PDF.",
+        min_length=1,
+    )
+    use_regex: bool = Field(
+        default=False,
+        description="Si es True, 'pattern' se interpreta como expresión regular; si es False, búsqueda literal.",
+    )
+    suffix: str = Field(
+        default="pattern",
+        description="Sufijo para el archivo de salida (ej: 'rapsheet' -> archivo_rapsheet.pdf).",
+    )
+    case_sensitive: bool = Field(
+        default=False,
+        description="Si es True, la búsqueda es sensible a mayúsculas/minúsculas.",
+    )
+    ocr_dpi: int = Field(
+        default=300,
+        description="Resolución DPI para conversión PDF a imagen (mayor calidad = más lento).",
+        ge=100,
+        le=600,
+    )
+    ocr_lang: str = Field(
+        default="eng",
+        description="Código de lenguaje para Tesseract OCR (ej: 'eng', 'spa', 'fra').",
+    )
+
+
+class OcrExtractResponse(BaseModel):
+    """
+    Response schema para el endpoint de extracción OCR.
+    """
+    ok: bool = Field(
+        ...,
+        description="True si la operación fue exitosa, False en caso de error.",
+    )
+    message: str = Field(
+        ...,
+        description="Mensaje descriptivo del resultado de la operación.",
+    )
+    input_pdf_path: str = Field(
+        ...,
+        description="Ruta del PDF de entrada procesado.",
+    )
+    output_pdf_path: Optional[str] = Field(
+        default=None,
+        description="Ruta del PDF generado con las páginas filtradas (null si no hubo coincidencias).",
+    )
+    matched_pages: List[int] = Field(
+        default_factory=list,
+        description="Lista de números de página (1-indexed) que coincidieron con el patrón.",
+    )

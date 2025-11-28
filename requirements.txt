@@ -9,7 +9,12 @@ pydantic-settings>=2.2.1
 # PDF manipulation
 pypdf>=4.2.0
 reportlab
-docx2pdf 
+docx2pdf
+
+# OCR dependencies
+pytesseract>=0.3.10
+pdf2image>=1.17.0
+Pillow>=10.0.0 
 
 # Dropbox integration
 dropbox>=12.0.0

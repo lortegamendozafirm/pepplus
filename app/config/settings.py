@@ -1,6 +1,6 @@
+# app/config/settigs.py
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 
 class Settings(BaseSettings):
     # 🔧 Configuración del modelo / settings (sustituye a class Config)
@@ -49,10 +49,19 @@ class Settings(BaseSettings):
         default=None,
         description="URL of the enqueuer service for long-running jobs.",
     )
+    tesseract_cmd: str | None = Field(
+        default=r"C:\Program Files\Tesseract-OCR\tessdata",
+        description="ubicación de la paqueteria"
+    )
+    poppler_path: str | None = Field(
+        default=r"C:\poppler\Library\bin",
+        description="ruta a bin para usar poppler"
+    )
 
+settings = Settings()
 
 if __name__ == "__main__":
-    settings = Settings()
+    
     print(settings.app_name)
     print(settings.dropbox_service_signature)
     print(settings.dropbox_token_service_url)

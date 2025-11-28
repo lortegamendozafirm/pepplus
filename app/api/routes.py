@@ -1,7 +1,12 @@
 # app/api/routes.py
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.schemas import PacketRequest, PacketResponse
+from app.api.schemas import (
+    PacketRequest,
+    PacketResponse,
+    OcrExtractRequest,
+    OcrExtractResponse,
+)
 from app.config.settings import Settings
 from app.domain.manifest import Manifest
 from app.domain.packet import Packet, SheetOutputConfig, SheetPosition
@@ -11,6 +16,7 @@ from app.integrations.enqueuer_client import EnqueuerClient
 from app.integrations.sheets_client import SheetsClient
 from app.logger import get_logger
 from app.services.packet_service import PacketService
+from app.services.ocr_extract_service import OcrExtractService
 
 logger = get_logger(__name__)
 
@@ -128,6 +134,90 @@ async def process_packet(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error while processing packet"
+        )
+
+
+@router.post("/ocr-extract", response_model=OcrExtractResponse)
+async def ocr_extract_pages(
+    request: OcrExtractRequest,
+) -> OcrExtractResponse:
+    """
+    Extrae páginas de un PDF basándose en un patrón de texto detectado mediante OCR.
+
+    Este endpoint:
+    1. Aplica OCR al PDF de entrada página por página
+    2. Identifica qué páginas contienen el patrón especificado (texto literal o regex)
+    3. Crea un nuevo PDF con solo las páginas que coinciden
+    4. Guarda el archivo en la misma carpeta con sufijo configurable
+
+    Ejemplo de uso:
+    - Input: /tmp/client/vawa_packet.pdf
+    - Pattern: "rap sheet" (o regex: "rap.*sheet")
+    - Output: /tmp/client/vawa_packet_rapsheet.pdf
+
+    NOTA: Este endpoint puede tardar varios minutos dependiendo del tamaño
+    del PDF y la calidad/DPI configurada para el OCR.
+    """
+    try:
+        logger.info(
+            "Received OCR extract request: input=%s, pattern='%s', use_regex=%s",
+            request.input_pdf_path,
+            request.pattern,
+            request.use_regex,
+        )
+
+        # Crear servicio OCR con configuración del request
+        ocr_service = OcrExtractService(
+            ocr_dpi=request.ocr_dpi,
+            ocr_lang=request.ocr_lang,
+        )
+
+        # Ejecutar extracción
+        result = ocr_service.extract_pages_by_pattern(
+            input_pdf_path=request.input_pdf_path,
+            pattern=request.pattern,
+            use_regex=request.use_regex,
+            suffix=request.suffix,
+            case_sensitive=request.case_sensitive,
+        )
+
+        # Convertir resultado a response schema
+        response = OcrExtractResponse(
+            ok=result.ok,
+            message=result.message,
+            input_pdf_path=result.input_pdf_path,
+            output_pdf_path=result.output_pdf_path,
+            matched_pages=result.matched_pages,
+        )
+
+        # Si hubo error, devolver HTTP 400 o 500
+        if not result.ok:
+            # Determinar código de error apropiado
+            if "not found" in result.message.lower():
+                status_code = status.HTTP_404_NOT_FOUND
+            elif "validation" in result.message.lower() or "invalid" in result.message.lower():
+                status_code = status.HTTP_400_BAD_REQUEST
+            else:
+                status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+
+            logger.error("OCR extraction failed: %s", result.message)
+            raise HTTPException(status_code=status_code, detail=result.message)
+
+        logger.info(
+            "OCR extraction completed successfully: matched_pages=%d, output=%s",
+            len(result.matched_pages),
+            result.output_pdf_path,
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Unexpected error in OCR extract endpoint: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error during OCR extraction: {str(e)}",
         )
 
 

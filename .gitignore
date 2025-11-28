@@ -34,3 +34,6 @@ credentials.json
 sa.json
 .tests/
 tests/
+
+.claude
+NUL
